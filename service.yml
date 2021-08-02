@@ -1,0 +1,14 @@
+apiVersion: app/v1
+kind: service
+metadata:
+  name: india
+lebels:
+  app: india
+selector:
+  type: LoadBalancer
+spec:
+  container:
+    port: 80
+    portip: 8080
+    nodeport: 31200
+    
