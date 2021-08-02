@@ -1,0 +1,684 @@
+Dockerfile
+FROM openjdk:8-alpine
+
+# Required for starting application up.
+RUN apk update && apk add /bin/sh
+
+RUN mkdir -p /opt/app
+ENV PROJECT_HOME /opt/app
+
+COPY target/jenkins-docker-k8s-project-1.0.jar $PROJECT_HOME/jenkins-docker-k8s-project-1.0.jar
+
+WORKDIR $PROJECT_HOME
+
+CMD ["java" ,"-jar","./jenkins-docker-k8s-project-1.0.jar"]
+
+
+
+
+Dockerfile_WithScript
+FROM openjdk:8-alpine
+
+# Required for starting application up.
+RUN apk update && apk add /bin/sh
+
+RUN mkdir -p /opt/app
+ENV PROJECT_HOME /opt/app
+
+COPY target/spring-boot-mongo-1.0.jar $PROJECT_HOME/spring-boot-mongo.jar
+COPY initScript.sh $PROJECT_HOME/initScript.sh
+WORKDIR $PROJECT_HOME
+
+CMD ["sh","initScript.sh"]
+
+
+JenkinsfileDockerSwarm
+node{
+    stage("Git CheckOut"){
+        git url: 'https://github.com/MithunTechnologiesDevOps/spring-boot-mongo-docker.git',branch: 'master'
+    }
+    
+    stage(" Maven Clean Package"){
+      def mavenHome =  tool name: "Maven-3.6.1", type: "maven"
+      def mavenCMD = "${mavenHome}/bin/mvn"
+      sh "${mavenCMD} clean package"
+    } 
+    
+    stage("Build Dokcer Image") {
+         sh "docker build -t dockerhandson/spring-boot-mongo ."
+    }
+    
+    stage("Docker Push"){
+        withCredentials([string(credentialsId: 'Docker_Hub_Pwd', variable: 'Docker_Hub_Pwd')]) {
+          sh "docker login -u dockerhandson -p ${Docker_Hub_Pwd}"
+        }
+        sh "docker push dockerhandson/spring-boot-mongo"
+        
+    }
+    
+    // Remove local image in Jenkins Server
+    stage("Remove Local Image"){
+        sh "docker rmi -f dockerhandson/spring-boot-mongo"
+    }
+    
+    stage("Deploy to docker swarm cluster"){
+        sshagent(['Docker_Swarm_Manager_Dev']) {
+		    sh 'scp -o StrictHostKeyChecking=no  docker-compose.yml ubuntu@172.31.47.232:'
+		    //sh 'ssh -o StrictHostKeyChecking=no ubuntu@172.31.47.232 docker stack rm springboot'
+                    sh 'ssh -o StrictHostKeyChecking=no ubuntu@172.31.47.232 docker stack deploy --prune --compose-file docker-compose.yml springboot'
+        }
+    }
+}
+
+
+JenkinsfileKubernetes
+node{
+    stage('SCM Checkout') {
+        git branch: 'main', credentialsId: 'GIT_CREDENTIALS', url: 'https://github.com/kavita4455/Jenkins-Docker-Kubernetes-Project1.git'
+    }
+    
+    stage('Maven Clean Package') {
+      def mavenHome =  tool name: "Maven", type: "maven"
+      def mavenCMD = "${mavenHome}/bin/mvn"
+      sh "${mavenCMD} clean package"
+    }
+    
+    stage('Build Docker Image'){        
+        sh "docker build -t kavita4455/jenkins-docker-k8s-project:${env.BUILD_ID} ."
+    }
+    
+    stage('Push Docker Image'){
+        withCredentials([string(credentialsId: 'DOCKER_HUB_CREDENTIALS', variable: 'DOCKER_HUB_CREDENTIALS')]) {
+            sh "docker login -u kavita4455 -p ${DOCKER_HUB_CREDENTIALS}"
+        }
+        sh "docker push kavita4455/jenkins-docker-k8s-project:${env.BUILD_ID}"
+    }
+    
+    stage("Deploy Application in K8S Cluster"){
+        kubernetesDeploy(
+         configs: 'springBootMongo.yml', 
+         kubeconfigId: 'KUBERNATES_CLUSTER_CONFIG',
+         enableConfigSubstitution: true
+        )
+    }
+    
+     /**
+     stage("Deploy To Kuberates Cluster"){
+     	sh "sed -i 's/tagversion/${env.BUILD_ID}/g' springBootMongo.yml"
+        sh 'kubectl apply -f springBootMongo.yml'
+     } **/
+	
+}
+
+
+
+README.md
+Build Project Using Maven
+Maven is java based build tool to generate executable
+
+packages(jar, ear,war) for java based projects.
+
+mvn clean package
+Create Docker Image
+Docker is a continerization tool.Using docker we can deploy our applications as
+
+containers using docker images. Containers contains application code and also the softwares,
+
+config files whatever is required for our application to run.
+
+Create docker image using Dockerfile
+
+docker build -t ameintu/docker-kubernetes-demo .
+Deploy Application Using Docker Compose
+docker-compose up -d 
+List Docker Containers
+docker ps -a
+License
+kavita Gupta
+
+
+
+docker-compose.yml
+
+version: '3.1'
+
+services:
+  springboot:
+    image: dockerhandson/spring-boot-mongo:latest
+    restart: always # This will be ignored if we deploy in docker swarm
+    environment:
+    - MONGO_DB_HOSTNAME=mongo
+    - MONGO_DB_USERNAME=devdb
+    - MONGO_DB_PASSWORD=devdb123
+    ports:
+      - 8080:8080
+    working_dir: /opt/app
+    depends_on:
+      - mongo
+    networks:
+    - springappnetwork  
+    deploy:  # This will be considered only in docker swarm.
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 20s
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  mongo:
+    image: mongo
+    environment:
+    - MONGO_INITDB_ROOT_USERNAME=devdb
+    - MONGO_INITDB_ROOT_PASSWORD=devdb123
+    volumes:
+      - mongodb:/data/db
+    restart: always
+    networks:
+    - springappnetwork
+    
+volumes:
+  mongodb:
+    external: true
+    
+networks:
+  springappnetwork:
+    external: true
+
+initScript.sh
+#!/bin/sh
+export MONGO_DB_USERNAME=${MONGO_DB_USERNAME:=`cat ${MONGO_DB_USERNAME_FILE}`}
+export MONGO_DB_PASSWORD=${MONGO_DB_PASSWORD:=`cat ${MONGO_DB_PASSWORD_FILE}`}
+java  -jar ./spring-boot-mongo.jar
+
+
+javawebapp-deployment.yml
+---
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  labels:
+    name: javawebapp
+  name: java-controller
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: javawebapp
+    spec:
+      containers:
+      - image: dockerhandson/java-web-app
+        name: javawebapp
+        ports:
+        - name: javawebapp
+          containerPort: 8080  
+---
+# Node Port Service
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    name: javawebapp
+  name: javawebapp
+spec:
+  type: NodePort
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    name: javawebapp
+
+nginx-secure-app.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-nginx
+  labels:
+    run: my-nginx
+spec:
+  type: NodePort
+  ports:
+  - port: 8080
+    targetPort: 80
+    protocol: TCP
+    name: http
+  - port: 443
+    protocol: TCP
+    name: https
+  selector:
+    run: my-nginx
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-nginx
+spec:
+  selector:
+    matchLabels:
+      run: my-nginx
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        run: my-nginx
+    spec:
+      volumes:
+      - name: secret-volume
+        secret:
+          secretName: nginxsecret
+      - name: configmap-volume
+        configMap:
+          name: nginxconfigmap
+      containers:
+      - name: nginxhttps
+        image: bprashanth/nginxhttps:1.0
+        ports:
+        - containerPort: 443
+        - containerPort: 80
+        volumeMounts:
+        - mountPath: /etc/nginx/ssl
+          name: secret-volume
+        - mountPath: /etc/nginx/conf.d
+          name: configmap-volume
+
+pom.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>2.1.5.RELEASE</version>
+		<relativePath />
+		<!-- lookup parent from repository -->
+	</parent>
+	<groupId>com.mt</groupId>
+	<artifactId>jenkins-docker-k8s-project</artifactId>
+	<version>1.0</version>
+	<properties>
+		<java.version>1.8</java.version>
+		<spring-boot.version>2.1.5.RELEASE</spring-boot.version>
+		<spring-cloud.version>Greenwich.RELEASE</spring-cloud.version>
+		<logstash-logback-encoder.version>6.1</logstash-logback-encoder.version>
+	</properties>
+
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-dependencies</artifactId>
+				<version>${spring-boot.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+			<dependency>
+				<groupId>org.springframework.cloud</groupId>
+				<artifactId>spring-cloud-dependencies</artifactId>
+				<version>${spring-cloud.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
+	<dependencies>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-mongodb</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-thymeleaf</artifactId>
+		</dependency>
+		<!-- webjar bootstrap and jquery dependencies -->
+		<dependency>
+			<groupId>org.webjars</groupId>
+			<artifactId>bootstrap</artifactId>
+			<version>3.3.7</version>
+		</dependency>
+		<dependency>
+			<groupId>org.webjars</groupId>
+			<artifactId>jquery</artifactId>
+			<version>3.2.1</version>
+		</dependency>
+
+		<!-- Spring Cloud Sleuth -->
+		<dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-sleuth</artifactId>
+		</dependency>
+		<!-- Logback encoder for Logstash -->
+		
+		<dependency>
+			<groupId>net.logstash.logback</groupId>
+			<artifactId>logstash-logback-encoder</artifactId>
+			<version>${logstash-logback-encoder.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+		</plugins>
+	</build>
+</project>
+
+
+
+springBootMongo-PrivateRepo.yml
+
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  labels:
+    name: springboot
+  name: spring-controller
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: springboot
+    spec:
+      imagePullSecrets:
+      - name: dockerreposecret
+      containers:
+      - image: 172.31.43.54:8083/spring-boot-mongo
+        name: springboot
+        ports:
+        - name: springboot
+          containerPort: 8080      
+---
+# Node Port Service
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    name: springboot
+  name: springboot
+spec:
+  type: NodePort
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    name: springboot
+---
+# Mongo host path rc
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  labels:
+    name: mongo
+  name: mongo-controller
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: mongo
+    spec:
+      containers:
+      - image: mongo
+        name: mongo
+        ports:
+        - name: mongo
+          containerPort: 27017
+          hostPort: 27017
+        volumeMounts:
+        - name: mongo-persistent-storage
+          mountPath: /data/db
+      volumes:
+      - name: mongo-persistent-storage
+        hostPath:
+         path: /tmp/dbbackup
+---
+# Mongo Node Port RC
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    name: mongo
+  name: mongo
+spec:
+  type: ClusterIP
+  ports:
+    - port: 27017
+      targetPort: 27017
+  selector:
+    name: mongo
+
+
+springBootMongo.yml
+# Config Map
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: springapp-configmap
+data:
+  # Configuration values can be set as key-value properties
+  username: springapp
+  password: mongodb@123
+---
+# Replication Controller for springapp
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: spring-controller
+spec:
+  replicas: 1
+  selector:
+    app: springboot
+  template:
+    metadata:
+      labels:
+        app: springboot
+    spec:
+      containers:
+      - image: ameintu/jenkins-docker-k8s-project:tagversion
+        name: springboot
+        ports:
+        - containerPort: 8080  
+        env:
+        - name: MONGO_DB_HOSTNAME
+          value: mongo
+        - name: MONGO_INITDB_ROOT_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: username 
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: password       
+---
+# Node Port Service For SpringApp
+apiVersion: v1
+kind: Service
+metadata:
+  name: springboot
+spec:
+  type: NodePort
+  ports:
+    - nodePort: 30872
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: springboot
+---
+# Mongo RC with host path Volume
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: mongo-controller
+spec:
+  replicas: 1
+  selector:
+    app: mongo
+  template:
+    metadata:
+      labels:
+        app: mongo
+    spec:
+      containers:
+      - image: mongo
+        name: mongo
+        env:
+        - name: MONGO_INITDB_ROOT_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: username 
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: password 
+        ports:
+        - containerPort: 27017
+        volumeMounts:
+        - name: mongo-persistent-storage
+          mountPath: /data/db
+      volumes:
+      - name: mongo-persistent-storage
+        hostPath:
+         path: /tmp/dbbackup
+---
+# Mongo Node Port RC
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+spec:
+  type: ClusterIP
+  ports:
+  - port: 27017
+    targetPort: 27017
+  selector:
+    app: mongo
+
+
+springBootMongoLB.yml
+# Config Map
+kind: ConfigMap 
+apiVersion: v1 
+metadata:
+  name: springapp-configmap
+data:
+  # Configuration values can be set as key-value properties
+  username: springapp
+  password: mongodb@123
+---
+# Replication Controller for springapp
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: spring-controller
+spec:
+  replicas: 1
+  selector:
+    app: springboot
+  template:
+    metadata:
+      labels:
+        app: springboot
+    spec:
+      containers:
+      - image: ameintu/jenkins-docker-k8s-project
+        name: springboot
+        ports:
+        - containerPort: 8080  
+        env:
+        - name: MONGO_DB_HOSTNAME
+          value: mongo
+        - name: MONGO_INITDB_ROOT_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: username 
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: password       
+---
+# Node Port Service For SpringApp
+apiVersion: v1
+kind: Service
+metadata:
+  name: springboot
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: springboot
+---
+# Mongo RC with host path Volume
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: mongo-controller
+spec:
+  replicas: 1
+  selector:
+    app: mongo
+  template:
+    metadata:
+      labels:
+        app: mongo
+    spec:
+      containers:
+      - image: mongo
+        name: mongo
+        env:
+        - name: MONGO_INITDB_ROOT_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: username 
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: springapp-configmap
+              key: password 
+        ports:
+        - containerPort: 27017
+        volumeMounts:
+        - name: mongo-persistent-storage
+          mountPath: /data/db
+      volumes:
+      - name: mongo-persistent-storage
+        hostPath:
+         path: /tmp/dbbackup
+---
+# Mongo Node Port RC
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+spec:
+  type: ClusterIP
+  ports:
+  - port: 27017
+    targetPort: 27017
+  selector:
+    app: mongo
